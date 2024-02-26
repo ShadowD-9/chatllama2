@@ -1,3 +1,5 @@
+!wget https://huggingface.co/TheBloke/Llama-2-7B-Chat-GGML/resolve/main/llama-2-7b-chat.ggmlv3.q2_K.bin
+
 import streamlit as st
 import os
 from ctransformers import AutoModelForCausalLM
