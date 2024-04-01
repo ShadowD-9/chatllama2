@@ -1,73 +1,78 @@
-!wget https://huggingface.co/TheBloke/Llama-2-7B-Chat-GGML/resolve/main/llama-2-7b-chat.ggmlv3.q2_K.bin
-
 import streamlit as st
 import os
-from ctransformers import AutoModelForCausalLM
+from langchain.document_loaders.csv_loader import CSVLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.llms import CTransformers
+from langchain.chains import ConversationalRetrievalChain
 
-# App title
-st.set_page_config(page_title="🦙💬 Llama 2 Chatbot")
 
-@st.cache_resource()
-def ChatModel(temperature, top_p):
-    return AutoModelForCausalLM.from_pretrained(
-        'ggml-llama-2-7b-chat-q4_0.bin', 
-        model_type='llama',
-        temperature=temperature, 
-        top_p = top_p)
+def add_vertical_space(spaces=1):
+    for _ in range(spaces):
+        st.sidebar.markdown("---")
 
-# Replicate Credentials
-with st.sidebar:
-    st.title('🦙💬 Llama 2 Chatbot')
+def main():
+    st.set_page_config(page_title="Llama-2 Recipe Chatbot")
+    st.title("Llama-2 Recipe Chatbot")
 
-    # Refactored from <https://github.com/a16z-infra/llama2-chatbot>
-    st.subheader('Models and parameters')
-    
-    temperature = st.sidebar.slider('temperature', min_value=0.01, max_value=2.0, value=0.1, step=0.01)
-    top_p = st.sidebar.slider('top_p', min_value=0.01, max_value=1.0, value=0.9, step=0.01)
-    # max_length = st.sidebar.slider('max_length', min_value=64, max_value=4096, value=512, step=8)
-    chat_model =ChatModel(temperature, top_p)
-    # st.markdown('📖 Learn how to build this app in this [blog](#link-to-blog)!')
+    st.sidebar.title("About")
+    st.sidebar.markdown('''
+        Llama-2 Recipe Chatbot.
+    ''')
 
-# Store LLM generated responses
-if "messages" not in st.session_state.keys():
-    st.session_state.messages = [{"role": "assistant", "content": "How may I assist you today?"}]
+    DB_FAISS_PATH = "vectorstore/db_faiss"
+    TEMP_DIR = "temp"
 
-# Display or clear chat messages
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.write(message["content"])
+    if not os.path.exists(TEMP_DIR):
+        os.makedirs(TEMP_DIR)
 
-def clear_chat_history():
-    st.session_state.messages = [{"role": "assistant", "content": "How may I assist you today?"}]
-st.sidebar.button('Clear Chat History', on_click=clear_chat_history)
+    uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=['csv'])
 
-# Function for generating LLaMA2 response
-def generate_llama2_response(prompt_input):
-    string_dialogue = "You are a helpful assistant. You do not respond as 'User' or pretend to be 'User'. You only respond once as 'Assistant'."
-    for dict_message in st.session_state.messages:
-        if dict_message["role"] == "user":
-            string_dialogue += "User: " + dict_message["content"] + "\\n\\n"
-        else:
-            string_dialogue += "Assistant: " + dict_message["content"] + "\\n\\n"
-    output = chat_model(f"prompt {string_dialogue} {prompt_input} Assistant: ")
-    return output
+    add_vertical_space(1)
+    st.sidebar.write('')
 
-# User-provided prompt
-if prompt := st.chat_input():
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.write(prompt)
+    if uploaded_file is not None:
+        file_path = os.path.join(TEMP_DIR, uploaded_file.name)
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getvalue())
 
-# Generate a new response if last message is not from assistant
-if st.session_state.messages[-1]["role"] != "assistant":
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            response = generate_llama2_response(prompt)
-            placeholder = st.empty()
-            full_response = ''
-            for item in response:
-                full_response += item
-                placeholder.markdown(full_response)
-            placeholder.markdown(full_response)
-    message = {"role": "assistant", "content": full_response}
-    st.session_state.messages.append(message)
+        st.write(f"Uploaded file: {uploaded_file.name}")
+        st.write("Processing CSV file...")
+
+        loader = CSVLoader(file_path=file_path, encoding="utf-8", csv_args={'delimiter': ','})
+        data = loader.load()
+
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=20)
+        text_chunks = text_splitter.split_documents(data)
+
+        st.write(f"Total text chunks: {len(text_chunks)}")
+
+        embeddings = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
+        docsearch = FAISS.from_documents(text_chunks, embeddings)
+        docsearch.save_local(DB_FAISS_PATH)
+
+        @st.cache_resource
+        def load_llm():
+            llm = CTransformers(
+                model="TheBloke/Llama-2-7B-Chat-GGML",
+                model_type="llama",
+                max_new_tokens=512,
+                temperature=0.5
+            )
+            return llm
+            
+        qa = ConversationalRetrievalChain.from_llm(llm, retriever=docsearch.as_retriever())
+
+        st.write("Enter your query:")
+        query = st.text_input("Input Prompt:")
+        if query:
+            with st.spinner("Processing your question..."):
+                chat_history = []
+                result = qa({"question": query, "chat_history": chat_history})
+                st.write("Response:", result['answer'])
+
+        os.remove(file_path)
+
+if __name__ == "__main__":
+    main()
